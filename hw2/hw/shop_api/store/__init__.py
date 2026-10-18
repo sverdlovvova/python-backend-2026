@@ -1,3 +1,4 @@
+from .database import init_db
 from .models import CartEntity, ItemEntity, ItemInfo, PatchItemInfo
 from .queries import (
     add_cart,
@@ -11,6 +12,8 @@ from .queries import (
     patch_item,
     update_item,
 )
+
+init_db()
 
 __all__ = [
     'CartEntity',

@@ -1,24 +1,41 @@
 from typing import Iterable
 
+from shop_api.store.database import Cart, CartItem, Item, SessionLocal
 from shop_api.store.models import CartEntity, ItemEntity, ItemInfo, PatchItemInfo
 
-_items = dict[int, ItemInfo]()
-_carts = dict[int, dict[int, int]]()
-_item_id = 0
-_cart_id = 0
+
+def _item_entity(item: Item) -> ItemEntity:
+    return ItemEntity(
+        id=item.id,
+        info=ItemInfo(name=item.name, price=item.price, deleted=item.deleted),
+    )
+
+
+def _cart_items(session, cart_id: int) -> dict[int, int]:
+    rows = session.query(CartItem).filter_by(cart_id=cart_id).all()
+    return {row.item_id: row.quantity for row in rows}
 
 
 def add_item(info: ItemInfo) -> ItemEntity:
-    global _item_id
-    _item_id += 1
-    _items[_item_id] = info
-    return ItemEntity(_item_id, info)
+    session = SessionLocal()
+    item = Item(name=info.name, price=info.price, deleted=False)
+    session.add(item)
+    session.commit()
+    session.refresh(item)
+    result = _item_entity(item)
+    session.close()
+    return result
 
 
 def get_item(item_id: int) -> ItemEntity | None:
-    if item_id not in _items:
+    session = SessionLocal()
+    item = session.get(Item, item_id)
+    if item is None:
+        session.close()
         return None
-    return ItemEntity(item_id, _items[item_id])
+    result = _item_entity(item)
+    session.close()
+    return result
 
 
 def get_items(
@@ -28,64 +45,107 @@ def get_items(
     max_price: float | None = None,
     show_deleted: bool = False,
 ) -> list[ItemEntity]:
-    result = []
-    for item_id, info in _items.items():
-        if not show_deleted and info.deleted:
-            continue
-        if min_price is not None and info.price < min_price:
-            continue
-        if max_price is not None and info.price > max_price:
-            continue
-        result.append(ItemEntity(item_id, info))
-    return result[offset:offset + limit]
+    session = SessionLocal()
+    query = session.query(Item)
+    if not show_deleted:
+        query = query.filter(Item.deleted.is_(False))
+    if min_price is not None:
+        query = query.filter(Item.price >= min_price)
+    if max_price is not None:
+        query = query.filter(Item.price <= max_price)
+
+    items = query.order_by(Item.id).offset(offset).limit(limit).all()
+    result = [_item_entity(item) for item in items]
+    session.close()
+    return result
 
 
 def update_item(item_id: int, name: str, price: float) -> ItemEntity | None:
-    if item_id not in _items:
+    session = SessionLocal()
+    item = session.get(Item, item_id)
+    if item is None:
+        session.close()
         return None
-    _items[item_id].name = name
-    _items[item_id].price = price
-    return ItemEntity(item_id, _items[item_id])
+    item.name = name
+    item.price = price
+    session.commit()
+    session.refresh(item)
+    result = _item_entity(item)
+    session.close()
+    return result
 
 
 def patch_item(item_id: int, patch: PatchItemInfo) -> ItemEntity | None:
-    if item_id not in _items or _items[item_id].deleted:
+    session = SessionLocal()
+    item = session.get(Item, item_id)
+    if item is None or item.deleted:
+        session.close()
         return None
     if patch.name is not None:
-        _items[item_id].name = patch.name
+        item.name = patch.name
     if patch.price is not None:
-        _items[item_id].price = patch.price
-    return ItemEntity(item_id, _items[item_id])
+        item.price = patch.price
+    session.commit()
+    session.refresh(item)
+    result = _item_entity(item)
+    session.close()
+    return result
 
 
 def delete_item(item_id: int) -> None:
-    if item_id in _items:
-        _items[item_id].deleted = True
+    session = SessionLocal()
+    item = session.get(Item, item_id)
+    if item is not None:
+        item.deleted = True
+        session.commit()
+    session.close()
 
 
 def add_cart() -> CartEntity:
-    global _cart_id
-    _cart_id += 1
-    _carts[_cart_id] = {}
-    return CartEntity(_cart_id, _carts[_cart_id])
+    session = SessionLocal()
+    cart = Cart()
+    session.add(cart)
+    session.commit()
+    session.refresh(cart)
+    result = CartEntity(cart.id, {})
+    session.close()
+    return result
 
 
 def get_cart(cart_id: int) -> CartEntity | None:
-    if cart_id not in _carts:
+    session = SessionLocal()
+    cart = session.get(Cart, cart_id)
+    if cart is None:
+        session.close()
         return None
-    return CartEntity(cart_id, _carts[cart_id])
+    result = CartEntity(cart.id, _cart_items(session, cart_id))
+    session.close()
+    return result
 
 
 def get_carts() -> Iterable[CartEntity]:
-    for cart_id, items in _carts.items():
-        yield CartEntity(cart_id, items)
+    session = SessionLocal()
+    carts = session.query(Cart).order_by(Cart.id).all()
+    result = [CartEntity(cart.id, _cart_items(session, cart.id)) for cart in carts]
+    session.close()
+    return result
 
 
 def add_to_cart(cart_id: int, item_id: int) -> CartEntity | None:
-    if cart_id not in _carts or item_id not in _items:
+    session = SessionLocal()
+    cart = session.get(Cart, cart_id)
+    item = session.get(Item, item_id)
+    if cart is None or item is None:
+        session.close()
         return None
-    if item_id in _carts[cart_id]:
-        _carts[cart_id][item_id] += 1
+
+    cart_item = session.get(CartItem, {'cart_id': cart_id, 'item_id': item_id})
+    if cart_item is None:
+        session.add(CartItem(cart_id=cart_id, item_id=item_id, quantity=1))
     else:
-        _carts[cart_id][item_id] = 1
-    return CartEntity(cart_id, _carts[cart_id])
+        cart_item.quantity += 1
+
+    session.commit()
+    result = CartEntity(cart_id, _cart_items(session, cart_id))
+    session.close()
+    return result
